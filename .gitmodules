@@ -1,0 +1,12 @@
+[submodule "Foundation"]
+	path = Foundation
+	url = https://github.com/cyj0912/Foundation
+[submodule "RHI"]
+	path = RHI
+	url = https://github.com/cyj0912/RHI
+[submodule "imgui"]
+	path = imgui
+	url = https://github.com/ocornut/imgui
+[submodule "SPIRV-Cross"]
+	path = SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross

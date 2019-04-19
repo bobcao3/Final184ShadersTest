@@ -1,0 +1,27 @@
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+
+layout(location = 0) out VertexData {
+    vec2 uv;
+    vec3 color;
+};
+
+layout(location = 0) in vec3 v_vertex;
+layout(location = 1) in vec3 v_color;
+
+layout(binding = 1) uniform UBO {
+	vec4 uniformColor;
+    mat4 projection;
+    mat4 modelview;
+};
+
+void main() {
+    vec4 position = vec4(v_vertex, 1.0);
+    position = modelview * position;
+    position = projection * position;
+
+    gl_Position = position;
+
+	uv = v_vertex.st + vec2(0.5);
+    color = v_color;
+}
