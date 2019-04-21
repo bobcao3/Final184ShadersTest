@@ -8,6 +8,8 @@
 
 #include <chrono>
 #include <thread>
+#include <string>
+#include <sstream>
 
 #include <glm/vec2.hpp> // glm::vec2
 #include <glm/vec3.hpp> // glm::vec3
@@ -15,8 +17,9 @@
 #include <glm/mat4x4.hpp> // glm::mat4
 #include <glm/gtc/matrix_transform.hpp> // glm::translate, glm::rotate, glm::scale, glm::perspective
 
-#include <assimp/Importer.hpp>      // C++ importer interface
-#include <assimp/scene.h>           // Output data structure
+#include <assimp/Importer.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
 
 #include "imgui.h"
 #include "imgui_impl_sdl.h"
@@ -44,6 +47,56 @@ static CShaderModule::Ref LoadSPIRV(CDevice::Ref device, const std::string& path
 // ============================================================================
 //  CreateScreenPass : Create Scene Render Pass
 // ============================================================================
+struct GBuffer {
+    CImageView::Ref albedoView;
+    CImageView::Ref normalsView;
+    CImageView::Ref depthView;
+};
+
+static CRenderPass::Ref CreateGBufferPass(CDevice::Ref device, CSwapChain::Ref swapChain, GBuffer& gbuffer)
+{
+    /*auto fbImage = swapChain->GetImage();*/
+    uint32_t width, height;
+    swapChain->GetSize(width, height);
+
+    auto albedoImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height, 1, 1, 1, nullptr);
+    auto normalsImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height, 1, 1, 1, nullptr);
+    auto depthImage = device->CreateImage2D(EFormat::D24_UNORM_S8_UINT, EImageUsageFlags::DepthStencil | EImageUsageFlags::Sampled, width, height);
+
+    CImageViewDesc albedoViewDesc;
+    albedoViewDesc.Format = EFormat::R8G8B8A8_UNORM;
+    albedoViewDesc.Type = EImageViewType::View2D;
+    albedoViewDesc.Range.Set(0, 1, 0, 1);
+    auto albedoView = device->CreateImageView(albedoViewDesc, albedoImage);
+    gbuffer.albedoView = albedoView;
+
+    CImageViewDesc normalsViewDesc;
+    normalsViewDesc.Format = EFormat::R8G8B8A8_UNORM;
+    normalsViewDesc.Type = EImageViewType::View2D;
+    normalsViewDesc.Range.Set(0, 1, 0, 1);
+    auto normalsView = device->CreateImageView(normalsViewDesc, normalsImage);
+    gbuffer.normalsView = normalsView;
+
+    CImageViewDesc depthViewDesc;
+    depthViewDesc.Format = EFormat::D24_UNORM_S8_UINT;
+    depthViewDesc.Type = EImageViewType::View2D;
+    depthViewDesc.Range.Set(0, 1, 0, 1);
+    auto depthView = device->CreateImageView(depthViewDesc, depthImage);
+    gbuffer.depthView = depthView;
+
+    CRenderPassDesc rpDesc;
+    rpDesc.AddAttachment(albedoView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
+    rpDesc.AddAttachment(normalsView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
+    rpDesc.AddAttachment(depthView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::DontCare);
+    rpDesc.Subpasses.resize(1);
+    rpDesc.Subpasses[0].AddColorAttachment(0);
+    rpDesc.Subpasses[0].AddColorAttachment(1);
+    rpDesc.Subpasses[0].SetDepthStencilAttachment(2);
+    swapChain->GetSize(rpDesc.Width, rpDesc.Height);
+    rpDesc.Layers = 1;
+    return device->CreateRenderPass(rpDesc);
+}
+
 static CRenderPass::Ref CreateScreenPass(CDevice::Ref device, CSwapChain::Ref swapChain)
 {
     auto fbImage = swapChain->GetImage();
@@ -56,27 +109,23 @@ static CRenderPass::Ref CreateScreenPass(CDevice::Ref device, CSwapChain::Ref sw
     fbViewDesc.Range.Set(0, 1, 0, 1);
     auto fbView = device->CreateImageView(fbViewDesc, fbImage);
 
-    auto depthImage = device->CreateImage2D(EFormat::D24_UNORM_S8_UINT,
-        EImageUsageFlags::DepthStencil, width, height);
-    CImageViewDesc depthViewDesc;
-    depthViewDesc.Format = EFormat::D24_UNORM_S8_UINT;
-    depthViewDesc.Type = EImageViewType::View2D;
-    depthViewDesc.Range.Set(0, 1, 0, 1);
-    auto depthView = device->CreateImageView(depthViewDesc, depthImage);
-
     CRenderPassDesc rpDesc;
     rpDesc.AddAttachment(fbView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
-    rpDesc.AddAttachment(depthView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::DontCare);
     rpDesc.Subpasses.resize(1);
     rpDesc.Subpasses[0].AddColorAttachment(0);
-    rpDesc.Subpasses[0].SetDepthStencilAttachment(1);
     swapChain->GetSize(rpDesc.Width, rpDesc.Height);
     rpDesc.Layers = 1;
     return device->CreateRenderPass(rpDesc);
 }
 
+// ============================================================================
+//  Mesh stuff
+// ============================================================================
+
 struct Vertex {
     glm::vec3 pos;
+    glm::vec3 normal;
+    glm::vec2 uv;
     glm::vec3 color;
 };
 
@@ -86,10 +135,86 @@ struct ShadersUniform {
     glm::mat4 modelview;
 };
 
+struct Mesh {
+    CBuffer::Ref vbo;
+    std::vector<Vertex> vertices;
+};
+
+struct Model {
+    std::vector<Mesh> meshes;
+    std::vector<Model*> subNodes;
+
+    void render(IRenderContext::Ref ctx) {
+        for (Mesh& m : meshes) {
+            ctx->BindVertexBuffer(0, *m.vbo, 0);
+            ctx->Draw(m.vertices.size(), 1, 0, 0);
+        }
+
+        for (Model* m : subNodes) {
+            m->render(ctx);
+        }
+    }
+};
+
+Model* processNode(aiNode* node, const aiScene* scene, CDevice::Ref device) {
+    Model* model = new Model;
+
+    if (node->mNumMeshes > 0) {
+        for (unsigned int i = 0; i < node->mNumMeshes; i++) {
+            aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
+            
+            Mesh m;
+
+            for (unsigned int i = 0; i < mesh->mNumFaces; i++) {
+                aiFace face = mesh->mFaces[i];
+                for (unsigned int j = 0; j < face.mNumIndices; j++) {
+                    int ind = face.mIndices[j];
+                    Vertex v = {
+                        {mesh->mVertices[ind].x, mesh->mVertices[ind].y, mesh->mVertices[ind].z},
+                        {mesh->mNormals[ind].x, mesh->mNormals[ind].y, mesh->mNormals[ind].z},
+                        {0.0, 0.0},
+                        {1.0, 1.0, 1.0}
+                    };
+                    if (mesh->mTextureCoords[0]) {
+                        v.uv = glm::vec2(mesh->mTextureCoords[0][ind].x, mesh->mTextureCoords[0][ind].y);
+                    }
+                    m.vertices.push_back(v);
+                }
+
+            }
+
+            m.vbo = device->CreateBuffer(m.vertices.size() * sizeof(Vertex), EBufferUsageFlags::VertexBuffer, m.vertices.data());
+
+            model->meshes.push_back(m);
+        }
+    }
+
+    for (unsigned int i = 0; i < node->mNumChildren; i++) {
+        model->subNodes.push_back(processNode(node->mChildren[i], scene, device));
+    }
+
+    return model;
+}
+
+Model* loadModel(std::string path, CDevice::Ref device) {
+    Assimp::Importer import;
+    const aiScene* scene = import.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenNormals);
+
+    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+        std::cout << "ERROR::ASSIMP::" << import.GetErrorString() << std::endl;
+        return nullptr;
+    }
+    // directory = path.substr(0, path.find_last_of('/'));
+
+    return processNode(scene->mRootNode, scene, device);
+}
+
 // ============================================================================
 //  Physics & game logic thread
 // ============================================================================
 bool terminated = false;
+double physicsTickRate = 0.0;
+double elapsedTime = 0.0;
 
 const int tickRate = 120;
 const double tickInterval = 1.0 / (double) tickRate;
@@ -98,22 +223,34 @@ using namespace std::chrono_literals;
 
 void game_logic(CPipeline::Ref pso, CBuffer::Ref ubo) {
     uint64_t ticksElapsed = 0;
+    uint64_t lastIntervalTicks = 0;
+
     auto timeStart = std::chrono::steady_clock::now();
 
-    while (!terminated) {
-        auto timeTarget = std::chrono::steady_clock::now() + std::chrono::duration<double>(tickInterval);
-        double elapsedTime = (std::chrono::steady_clock::now() - timeStart).count() * 1.0e-9;
+    double tickRateLastUpdated = -1.0;
 
+    while (!terminated) {
+        auto timeTarget = timeStart + (ticksElapsed + 1) * std::chrono::duration<double>(tickInterval);
+        elapsedTime = (std::chrono::steady_clock::now() - timeStart).count() * 1.0e-9;
+
+        if (elapsedTime > tickRateLastUpdated + 1.0) {
+            physicsTickRate = (double)(ticksElapsed - lastIntervalTicks) / (elapsedTime - tickRateLastUpdated);
+            lastIntervalTicks = ticksElapsed;
+            tickRateLastUpdated = elapsedTime;
+        }
+
+        // Graphics view stuff
         ShadersUniform* uniform = static_cast<ShadersUniform*>(ubo->Map(0, sizeof(ShadersUniform)));
         uniform->color = { std::sin(elapsedTime), std::cos(elapsedTime), 1.0f, 1.0f };
         uniform->modelview = glm::lookAt(
-            glm::vec3(std::sin(elapsedTime), 0.0f, std::cos(elapsedTime)),
-            glm::vec3(0.0f, 0.0f, 0.0f),
-            glm::vec3(0.0f, 1.0f, 0.0f)
+            glm::vec3(std::sin(elapsedTime) * 16.0f, 8.0f, std::cos(elapsedTime) * 16.0f),
+            glm::vec3(0.0f, 8.0f, 0.0f),
+            glm::vec3(0.0f, -1.0f, 0.0f)
         );
         ubo->Unmap();
 
         ticksElapsed++;
+
         std::this_thread::sleep_until(timeTarget);
     }
 }
@@ -146,6 +283,9 @@ int main(int argc, char* argv[])
     surfaceDesc.Win32.Window = wmInfo.info.win.window;
     auto swapChain = device->CreateSwapChain(surfaceDesc, EFormat::R8G8B8A8_UNORM);
 
+    GBuffer gbuffer;
+
+    auto gbufferPass = CreateGBufferPass(device, swapChain, gbuffer);
     auto screenPass = CreateScreenPass(device, swapChain);
 
     // Setup ImGui
@@ -158,33 +298,19 @@ int main(int argc, char* argv[])
     CRHIImGuiBackend::Init(device, screenPass);
 
     // Setup pipeline
-    CPipeline::Ref pso;
+    CPipeline::Ref pso_gbuffer;
     {
         CPipelineDesc pipelineDesc;
         CRasterizerDesc rastDesc;
         CDepthStencilDesc depthStencilDesc;
         CBlendDesc blendDesc;
         rastDesc.CullMode = ECullModeFlags::None;
-        pipelineDesc.VS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/Demo1.vert.spv");
-        pipelineDesc.PS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/Demo2.frag.spv");
+        pipelineDesc.VS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/gbuffers.vert.spv");
+        pipelineDesc.PS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/gbuffers.frag.spv");
         pipelineDesc.RasterizerState = &rastDesc;
         pipelineDesc.DepthStencilState = &depthStencilDesc;
         pipelineDesc.BlendState = &blendDesc;
-        pipelineDesc.RenderPass = screenPass;
-
-        CVertexInputAttributeDesc vertInputDescVertices = {
-            0,
-            EFormat::R32G32B32_SFLOAT,
-            offsetof(Vertex, pos),
-            0
-        };
-
-        CVertexInputAttributeDesc vertInputDescColors = {
-            1,
-            EFormat::R32G32B32_SFLOAT,
-            offsetof(Vertex, color),
-            0
-        };
+        pipelineDesc.RenderPass = gbufferPass;
 
         CVertexInputBindingDesc vertInputBinding = {
             0,
@@ -192,12 +318,34 @@ int main(int argc, char* argv[])
             false
         };
 
-
-        pipelineDesc.VertexAttributes = { vertInputDescVertices, vertInputDescColors };
+        pipelineDesc.VertexAttributes = {
+            {0, EFormat::R32G32B32_SFLOAT, offsetof(Vertex, pos),    0},
+            {1, EFormat::R32G32B32_SFLOAT, offsetof(Vertex, normal), 0},
+            {2, EFormat::R32G32_SFLOAT,    offsetof(Vertex, uv),     0},
+            {3, EFormat::R32G32B32_SFLOAT, offsetof(Vertex, color),  0}
+        };
         pipelineDesc.VertexBindings = { vertInputBinding };
 
-        pso = device->CreatePipeline(pipelineDesc);
+        pso_gbuffer = device->CreatePipeline(pipelineDesc);
     }
+
+    CPipeline::Ref pso_screen;
+    {
+        CPipelineDesc pipelineDesc;
+        CRasterizerDesc rastDesc;
+        CDepthStencilDesc depthStencilDesc;
+        CBlendDesc blendDesc;
+        rastDesc.CullMode = ECullModeFlags::None;
+        pipelineDesc.VS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/deferred.vert.spv");
+        pipelineDesc.PS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/deferred.frag.spv");
+        pipelineDesc.RasterizerState = &rastDesc;
+        pipelineDesc.DepthStencilState = &depthStencilDesc;
+        pipelineDesc.BlendState = &blendDesc;
+        pipelineDesc.RenderPass = screenPass;
+
+        pso_screen = device->CreatePipeline(pipelineDesc);
+    }
+
 
     // Setup uniforms
     auto ubo = device->CreateBuffer(sizeof(ShadersUniform), EBufferUsageFlags::ConstantBuffer);
@@ -212,13 +360,8 @@ int main(int argc, char* argv[])
     uniform->modelview = glm::mat4(1.0);
     ubo->Unmap();
 
-    // Setup VBO
-    Vertex vertices[] = {
-    {{ 0.5f,  0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
-    {{-0.5f, -0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
-    {{ 0.5f, -0.5f, 0.0f}, {0.0f, 0.0f, 1.0f}}
-    };
-    auto vbo = device->CreateBuffer(3 * sizeof(Vertex), EBufferUsageFlags::VertexBuffer, &vertices);
+    // Load model
+    auto scene = loadModel(APP_SOURCE_DIR "/nano.fbx", device);
 
     // Setup texture
     int x, y, comp;
@@ -238,7 +381,7 @@ int main(int argc, char* argv[])
     // Main render loop
     auto ctx = device->GetImmediateContext();
 
-    std::thread physicsThread(game_logic, pso, ubo);
+    std::thread physicsThread(game_logic, pso_gbuffer, ubo);
 
     while (!terminated)
     {
@@ -255,12 +398,18 @@ int main(int argc, char* argv[])
         ImGui_ImplSDL2_NewFrame(window);
         ImGui::NewFrame();
 
-        ImGui::ShowDemoWindow();
+        ImGui::Begin("Controls");
+
+        std::ostringstream oss;
+
+        ImGui::Text("Physics tick rate: %f", physicsTickRate);
+        ImGui::Text("Elapsed time: %f", elapsedTime);
+        
+        ImGui::End();
 
         // swapchain stuff
         bool swapOk = swapChain->AcquireNextImage();
-        if (!swapOk)
-        {
+        if (!swapOk) {
             screenPass.reset();
             swapChain->Resize(UINT32_MAX, UINT32_MAX);
             screenPass = CreateScreenPass(device, swapChain);
@@ -268,14 +417,21 @@ int main(int argc, char* argv[])
         }
 
         // Record render pass
-        ctx->BeginRenderPass(*screenPass,
+        ctx->BeginRenderPass(*gbufferPass,
             { CClearValue(0.2f, 0.3f, 0.4f, 0.0f), CClearValue(1.0f, 0) });
-        ctx->BindPipeline(*pso);
+        ctx->BindPipeline(*pso_gbuffer);
         ctx->BindBuffer(*ubo, 0, 16, 0, 1, 0);
-        ctx->BindVertexBuffer(0, *vbo, 0);
+        scene->render(ctx);
+        ctx->EndRenderPass();
+
+        ctx->BeginRenderPass(*screenPass,
+            { CClearValue(0.0f, 0.0f, 0.0f, 0.0f), CClearValue(1.0f, 0) });
+        ctx->BindPipeline(*pso_screen);
         ctx->BindSampler(*sampler, 1, 0, 0);
-        ctx->BindImageView(*checkerView, 1, 1, 0);
-        ctx->Draw(3, 1, 0, 0);
+        ctx->BindImageView(*gbuffer.albedoView, 1, 1, 0);
+        ctx->BindImageView(*gbuffer.normalsView, 1, 2, 0);
+        ctx->BindImageView(*gbuffer.depthView, 1, 3, 0);
+        ctx->Draw(6, 1, 0, 0);
 
         ImGui::Render();
         CRHIImGuiBackend::RenderDrawData(ImGui::GetDrawData(), ctx);

@@ -21,19 +21,19 @@ add_subdirectory(RHI)
 
 find_package(SDL2 REQUIRED)
 find_package(glm REQUIRED)
-find_package(assimp REQUIRED)
 
 include_directories(${GLM_INCLUDE_DIRS})
 link_directories(${GLM_LIBRARY_DIRS})
 add_definitions(${GLM_DEFINITIONS})
 
-include_directories(${ASSIMP_INCLUDE_DIRS})
-link_directories(${ASSIMP_LIBRARY_DIRS})
-add_definitions(${ASSIMP_DEFINITIONS})
+find_package(ASSIMP REQUIRED)
+message(STATUS "Found ASSIMP in ${ASSIMP_INCLUDE_DIR}")
+include_directories(${ASSIMP_INCLUDE_DIR})
 
 add_executable (Final184ShadersTest "src/Final184ShadersTest.cpp" "src/imgui_impl_sdl.cpp")
 target_compile_definitions(Final184ShadersTest PRIVATE -DAPP_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+target_link_libraries(Final184ShadersTest ${ASSIMP_LIBRARIES})
 target_link_libraries(Final184ShadersTest Foundation)
 target_link_libraries(Final184ShadersTest RHI)
 
