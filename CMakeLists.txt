@@ -15,6 +15,16 @@ add_library(imgui
 )
 target_include_directories(imgui INTERFACE imgui)
 
+if (UNIX AND NOT APPLE)
+	set(LINUX TRUE)
+endif()
+
+if (LINUX)
+	set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/")
+	find_package(X11 REQUIRED)
+	find_package(XCB REQUIRED)
+endif()
+
 add_subdirectory(Foundation)
 add_subdirectory(SPIRV-Cross)
 add_subdirectory(RHI)
@@ -36,6 +46,10 @@ target_compile_definitions(Final184ShadersTest PRIVATE -DAPP_SOURCE_DIR="${CMAKE
 target_link_libraries(Final184ShadersTest ${ASSIMP_LIBRARIES})
 target_link_libraries(Final184ShadersTest Foundation)
 target_link_libraries(Final184ShadersTest RHI)
+
+if (LINUX)
+	target_link_libraries(Final184ShadersTest ${X11_LIBRARIES} ${XCB_LIBRARIES} X11-xcb)
+endif(LINUX)
 
 find_package(SDL2 CONFIG REQUIRED)
 target_link_libraries(Final184ShadersTest SDL2::SDL2 SDL2::SDL2main)
