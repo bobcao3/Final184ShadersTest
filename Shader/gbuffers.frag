@@ -5,6 +5,7 @@ layout(location = 0) in VertexData {
     vec2 uv;
     vec3 color;
     vec3 n;
+    vec3 pos;
 };
 
 layout(location = 0) out vec4 outAlbedo;
@@ -18,5 +19,5 @@ layout(binding = 1) uniform UBO {
 
 void main() {
     outAlbedo = uniformColor * vec4(color, 1.0);
-    outNormal = vec4(n * 0.5 + 0.5, 0.0);
+    outNormal = vec4(n, 0.0);
 }

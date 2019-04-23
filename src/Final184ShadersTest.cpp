@@ -11,6 +11,10 @@
 #include <string>
 #include <sstream>
 
+#define GLM_FORCE_RADIANS
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL
+
 #include <glm/vec2.hpp> // glm::vec2
 #include <glm/vec3.hpp> // glm::vec3
 #include <glm/vec4.hpp> // glm::vec4
@@ -59,8 +63,8 @@ static CRenderPass::Ref CreateGBufferPass(CDevice::Ref device, CSwapChain::Ref s
     uint32_t width, height;
     swapChain->GetSize(width, height);
 
-    auto albedoImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height, 1, 1, 1, nullptr);
-    auto normalsImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height, 1, 1, 1, nullptr);
+    auto albedoImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height);
+    auto normalsImage = device->CreateImage2D(EFormat::R8G8B8A8_UNORM, EImageUsageFlags::RenderTarget | EImageUsageFlags::Sampled, width, height);
     auto depthImage = device->CreateImage2D(EFormat::D24_UNORM_S8_UINT, EImageUsageFlags::DepthStencil | EImageUsageFlags::Sampled, width, height);
 
     CImageViewDesc albedoViewDesc;
@@ -80,6 +84,7 @@ static CRenderPass::Ref CreateGBufferPass(CDevice::Ref device, CSwapChain::Ref s
     CImageViewDesc depthViewDesc;
     depthViewDesc.Format = EFormat::D24_UNORM_S8_UINT;
     depthViewDesc.Type = EImageViewType::View2D;
+    depthViewDesc.DepthStencilAspect = EDepthStencilAspectFlags::Depth;
     depthViewDesc.Range.Set(0, 1, 0, 1);
     auto depthView = device->CreateImageView(depthViewDesc, depthImage);
     gbuffer.depthView = depthView;
@@ -87,11 +92,10 @@ static CRenderPass::Ref CreateGBufferPass(CDevice::Ref device, CSwapChain::Ref s
     CRenderPassDesc rpDesc;
     rpDesc.AddAttachment(albedoView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
     rpDesc.AddAttachment(normalsView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
-    rpDesc.AddAttachment(depthView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::DontCare);
-    rpDesc.Subpasses.resize(1);
-    rpDesc.Subpasses[0].AddColorAttachment(0);
-    rpDesc.Subpasses[0].AddColorAttachment(1);
-    rpDesc.Subpasses[0].SetDepthStencilAttachment(2);
+    rpDesc.AddAttachment(depthView, EAttachmentLoadOp::Clear, EAttachmentStoreOp::Store);
+    rpDesc.NextSubpass().AddColorAttachment(0)
+                        .AddColorAttachment(1)
+                        .SetDepthStencilAttachment(2);
     swapChain->GetSize(rpDesc.Width, rpDesc.Height);
     rpDesc.Layers = 1;
     return device->CreateRenderPass(rpDesc);
@@ -133,6 +137,9 @@ struct ShadersUniform {
     glm::vec4 color;
     glm::mat4 projection;
     glm::mat4 modelview;
+    glm::mat4 projectionInverse;
+    float camera_near;
+    float camera_far;
 };
 
 struct Mesh {
@@ -245,7 +252,7 @@ void game_logic(CPipeline::Ref pso, CBuffer::Ref ubo) {
         uniform->modelview = glm::lookAt(
             glm::vec3(std::sin(elapsedTime) * 16.0f, 8.0f, std::cos(elapsedTime) * 16.0f),
             glm::vec3(0.0f, 8.0f, 0.0f),
-            glm::vec3(0.0f, -1.0f, 0.0f)
+            glm::vec3(0.0f, 1.0f, 0.0f)
         );
         ubo->Unmap();
 
@@ -354,9 +361,11 @@ int main(int argc, char* argv[])
     uniform->projection = glm::perspective(
         glm::radians(70.0),
         640.0 / 480.0,
-        0.01,
-        256.0
+        0.1,
+        50.0
     );
+    uniform->projection[1][1] *= -1;
+    uniform->projectionInverse = glm::inverse(uniform->projection);
     uniform->modelview = glm::mat4(1.0);
     ubo->Unmap();
 
@@ -418,19 +427,20 @@ int main(int argc, char* argv[])
 
         // Record render pass
         ctx->BeginRenderPass(*gbufferPass,
-            { CClearValue(0.2f, 0.3f, 0.4f, 0.0f), CClearValue(1.0f, 0) });
+            { CClearValue(0.2f, 0.3f, 0.4f, 0.0f), CClearValue(0.0f, 0.0f, 0.0f, 0.0f), CClearValue(1.0f, 0) });
         ctx->BindPipeline(*pso_gbuffer);
-        ctx->BindBuffer(*ubo, 0, 16, 0, 1, 0);
+        ctx->BindBuffer(*ubo, 0, sizeof(ShadersUniform), 0, 1, 0);
         scene->render(ctx);
         ctx->EndRenderPass();
 
         ctx->BeginRenderPass(*screenPass,
-            { CClearValue(0.0f, 0.0f, 0.0f, 0.0f), CClearValue(1.0f, 0) });
+            { CClearValue(0.0f, 0.0f, 0.0f, 0.0f) });
         ctx->BindPipeline(*pso_screen);
-        ctx->BindSampler(*sampler, 1, 0, 0);
-        ctx->BindImageView(*gbuffer.albedoView, 1, 1, 0);
-        ctx->BindImageView(*gbuffer.normalsView, 1, 2, 0);
-        ctx->BindImageView(*gbuffer.depthView, 1, 3, 0);
+        ctx->BindBuffer(*ubo, 0, sizeof(ShadersUniform), 1, 0, 0);
+        ctx->BindSampler(*sampler, 0, 0, 0);
+        ctx->BindImageView(*gbuffer.albedoView, 0, 1, 0);
+        ctx->BindImageView(*gbuffer.normalsView, 0, 2, 0);
+        ctx->BindImageView(*gbuffer.depthView, 0, 3, 0);
         ctx->Draw(6, 1, 0, 0);
 
         ImGui::Render();
