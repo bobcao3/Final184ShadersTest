@@ -3,7 +3,17 @@
 #include <RHIInstance.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
-#include <Windows.h>
+
+#include <Platform.h>
+
+#if TC_OS == TC_OS_WINDOWS
+    #include <Windows.h>
+#elif TC_OS == TC_OS_LINUX
+    #include <xcb/xcb.h>
+    #include <X11/Xlib-xcb.h>
+    #undef None
+#endif
+
 #include <fstream>
 
 #include <chrono>
@@ -285,9 +295,15 @@ int main(int argc, char* argv[])
 
     // Bind presentation surface to window
     CPresentationSurfaceDesc surfaceDesc;
-    surfaceDesc.Type = EPresentationSurfaceDescType::Win32;
+#if TC_OS == TC_OS_WINDOWS
     surfaceDesc.Win32.Instance = wmInfo.info.win.hinstance;
     surfaceDesc.Win32.Window = wmInfo.info.win.window;
+    surfaceDesc.Type = EPresentationSurfaceDescType::Win32;
+#elif TC_OS == TC_OS_LINUX
+    surfaceDesc.Linux.xconn = XGetXCBConnection(wmInfo.info.x11.display);
+    surfaceDesc.Linux.window = wmInfo.info.x11.window;
+    surfaceDesc.Type = EPresentationSurfaceDescType::Linux;
+#endif
     auto swapChain = device->CreateSwapChain(surfaceDesc, EFormat::R8G8B8A8_UNORM);
 
     GBuffer gbuffer;
@@ -314,9 +330,9 @@ int main(int argc, char* argv[])
         rastDesc.CullMode = ECullModeFlags::None;
         pipelineDesc.VS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/gbuffers.vert.spv");
         pipelineDesc.PS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/gbuffers.frag.spv");
-        pipelineDesc.RasterizerState = &rastDesc;
-        pipelineDesc.DepthStencilState = &depthStencilDesc;
-        pipelineDesc.BlendState = &blendDesc;
+        pipelineDesc.RasterizerState = rastDesc;
+        pipelineDesc.DepthStencilState = depthStencilDesc;
+        pipelineDesc.BlendState = blendDesc;
         pipelineDesc.RenderPass = gbufferPass;
 
         CVertexInputBindingDesc vertInputBinding = {
@@ -345,9 +361,9 @@ int main(int argc, char* argv[])
         rastDesc.CullMode = ECullModeFlags::None;
         pipelineDesc.VS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/deferred.vert.spv");
         pipelineDesc.PS = LoadSPIRV(device, APP_SOURCE_DIR "/Shader/deferred.frag.spv");
-        pipelineDesc.RasterizerState = &rastDesc;
-        pipelineDesc.DepthStencilState = &depthStencilDesc;
-        pipelineDesc.BlendState = &blendDesc;
+        pipelineDesc.RasterizerState = rastDesc;
+        pipelineDesc.DepthStencilState = depthStencilDesc;
+        pipelineDesc.BlendState = blendDesc;
         pipelineDesc.RenderPass = screenPass;
 
         pso_screen = device->CreatePipeline(pipelineDesc);
